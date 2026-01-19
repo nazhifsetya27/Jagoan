@@ -280,8 +280,8 @@ bot.catch((err, ctx) => {
 
 async function startServer() {
   try {
-    // Start Express server first
-    app.listen(PORT, () => {
+    // Start Express server first - bind to 0.0.0.0 for IPv4 connectivity
+    app.listen(PORT, "0.0.0.0", () => {
       console.log("🚀 Jagoan Server is running");
       console.log(
         `📡 Webhook endpoint: http://localhost:${PORT}/webhook/transaction`
