@@ -35,10 +35,15 @@ class JagoanListenerService : NotificationListenerService() {
     
     // Server URL - Using localhost via ADB port forwarding
     // This bypasses WiFi network isolation issues
-    private val SERVER_URL = "http://localhost:3000/webhook/transaction"
+    private val SERVER_URL = "https://jagoan.kalachakra.io/webhook/transaction"
     
     // Package name of the Jago banking app (verified via adb)
     private val JAGO_PACKAGE = "com.jago.digitalBanking"
+    
+    // Deduplication: Store pairs of (Time, Amount)
+    // We keep a small history to prevent double-counting the EXACT same amount within a short window
+    private val processedTransactions = mutableListOf<Pair<Long, Double>>()
+    private val DEBOUNCE_TIME = 5000L // 5 seconds window for exact duplicate amounts
 
     /**
      * This function is called whenever a new notification is posted
@@ -74,6 +79,26 @@ class JagoanListenerService : NotificationListenerService() {
         val amount = extractAmount(text)
         
         if (amount != null) {
+            val currentTime = System.currentTimeMillis()
+            
+            // Cleanup: Remove transactions older than DEBOUNCE_TIME
+            processedTransactions.removeAll { (time, _) -> 
+                currentTime - time > DEBOUNCE_TIME 
+            }
+            
+            // Check if we already processed this EXACT amount recently
+            val isDuplicate = processedTransactions.any { (_, storedAmount) -> 
+                storedAmount == amount 
+            }
+            
+            if (isDuplicate) {
+                Log.d(TAG, "♻️ Duplicate transaction amount ($amount) detected within ${DEBOUNCE_TIME/1000}s, ignoring...")
+                return
+            }
+
+            // Add to processed list
+            processedTransactions.add(Pair(currentTime, amount))
+            
             Log.d(TAG, "💰 Amount extracted: $amount")
             // Send the amount to the server
             sendToServer(amount)
