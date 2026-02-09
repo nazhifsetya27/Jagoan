@@ -13,6 +13,7 @@ const MY_CHAT_ID = process.env.MY_CHAT_ID;
 const NOTION_KEY = process.env.NOTION_KEY;
 const NOTION_DATABASE_ID = process.env.NOTION_DATABASE_ID;
 const NOTION_LIVING_COST_PAGE_ID = process.env.NOTION_LIVING_COST_PAGE_ID;
+const NOTION_BUDGET_RELATION_NAME = process.env.NOTION_BUDGET_RELATION_NAME;
 
 // Validate required environment variables
 const requiredEnvVars = [
@@ -95,8 +96,8 @@ async function createNotionTransaction(name, amount) {
     };
 
     // Add Living cost category relation if page ID is provided
-    if (NOTION_LIVING_COST_PAGE_ID) {
-      properties["Februari Budgeting (25 Jan – 25 Feb)\n"] = {
+    if (NOTION_LIVING_COST_PAGE_ID && NOTION_BUDGET_RELATION_NAME) {
+      properties[NOTION_BUDGET_RELATION_NAME] = {
         relation: [
           {
             id: NOTION_LIVING_COST_PAGE_ID,
@@ -216,8 +217,8 @@ bot.on("text", async (ctx) => {
       return;
     }
 
-    // Get the most recent transaction (first in cache)
-    const transactionId = cachedKeys[0];
+    // Get the most recent transaction (last in cache - newest one)
+    const transactionId = cachedKeys[cachedKeys.length - 1];
     const transaction = cache.get(transactionId);
 
     if (!transaction) {
