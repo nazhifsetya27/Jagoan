@@ -45,6 +45,71 @@ class JagoanListenerService : NotificationListenerService() {
     private val processedTransactions = mutableListOf<Pair<Long, Double>>()
     private val DEBOUNCE_TIME = 5000L // 5 seconds window for exact duplicate amounts
 
+    // Notification type constants
+    private val TYPE_OUTGOING = "OUTGOING"  // Real expenses (money going out)
+    private val TYPE_INCOMING = "INCOMING"  // Money received, promos, cashback, etc.
+
+    /**
+     * Detect if the notification is an outgoing transaction (expense) or incoming (revenue/promo)
+     * 
+     * @param title The notification title
+     * @param text The notification text
+     * @return TYPE_OUTGOING for expenses, TYPE_INCOMING for received money/promos
+     */
+    private fun detectNotificationType(title: String, text: String): String {
+        val combinedText = "$title $text".lowercase()
+        
+        // Keywords that indicate OUTGOING transactions (expenses)
+        val outgoingKeywords = listOf(
+            "transfer berhasil",    // Successful transfer (sent)
+            "pembayaran berhasil",  // Successful payment
+            "transaksi berhasil",   // Successful transaction
+            "berhasil dikirim",     // Successfully sent
+            "tarik tunai",          // Cash withdrawal
+            "pembayaran ke",        // Payment to
+            "transfer ke",          // Transfer to
+            "top up",               // Top up (e.g., e-wallet)
+            "bayar ",               // Pay
+            "beli ",                // Buy
+            "pembelian"             // Purchase
+        )
+        
+        // Keywords that indicate INCOMING transactions (received money, promos, cashback)
+        val incomingKeywords = listOf(
+            "transfer masuk",       // Incoming transfer
+            "terima ",              // Receive
+            "menerima",             // Received
+            "promo",                // Promo
+            "cashback",             // Cashback
+            "bonus",                // Bonus
+            "hadiah",               // Gift/reward
+            "pengembalian",         // Refund
+            "refund",               // Refund (English)
+            "saldo masuk",          // Balance in
+            "dari ",                // From (indicates receiving)
+            "bunga",                // Interest
+            "reward"                // Reward
+        )
+        
+        // Check for outgoing keywords first (expenses are what we want to track)
+        for (keyword in outgoingKeywords) {
+            if (combinedText.contains(keyword)) {
+                return TYPE_OUTGOING
+            }
+        }
+        
+        // Check for incoming keywords
+        for (keyword in incomingKeywords) {
+            if (combinedText.contains(keyword)) {
+                return TYPE_INCOMING
+            }
+        }
+        
+        // Default: If we can't determine, assume INCOMING to be safe
+        // This prevents accidentally logging promos as expenses
+        return TYPE_INCOMING
+    }
+
     /**
      * This function is called whenever a new notification is posted
      * 
@@ -75,6 +140,10 @@ class JagoanListenerService : NotificationListenerService() {
         Log.d(TAG, "Title: $title")
         Log.d(TAG, "Text: $text")
 
+        // Detect notification type (OUTGOING or INCOMING)
+        val notificationType = detectNotificationType(title, text)
+        Log.d(TAG, "📋 Notification type: $notificationType")
+
         // Try to extract the amount from the notification
         val amount = extractAmount(text)
         
@@ -100,8 +169,8 @@ class JagoanListenerService : NotificationListenerService() {
             processedTransactions.add(Pair(currentTime, amount))
             
             Log.d(TAG, "💰 Amount extracted: $amount")
-            // Send the amount to the server
-            sendToServer(amount)
+            // Send the amount and type to the server
+            sendToServer(amount, notificationType)
         } else {
             Log.d(TAG, "⚠️ No amount found in notification")
         }
@@ -153,14 +222,16 @@ class JagoanListenerService : NotificationListenerService() {
      * the main thread. Network operations must always run in the background.
      * 
      * @param amount The transaction amount to send
+     * @param type The notification type (OUTGOING or INCOMING)
      */
-    private fun sendToServer(amount: Double) {
+    private fun sendToServer(amount: Double, type: String) {
         // Launch a coroutine on the IO dispatcher (optimized for network operations)
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                // Create JSON payload: { "amount": 50000 }
+                // Create JSON payload: { "amount": 50000, "type": "OUTGOING" }
                 val json = JSONObject().apply {
                     put("amount", amount)
+                    put("type", type)
                 }
                 
                 Log.d(TAG, "📤 Sending to server: $json")

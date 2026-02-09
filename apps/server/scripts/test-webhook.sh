@@ -1,23 +1,26 @@
 #!/bin/bash
 
 # Test script for Jagoan webhook endpoint
-# Usage: ./test-webhook.sh [amount]
-# Example: ./test-webhook.sh 50000
+# Usage: ./test-webhook.sh [amount] [type]
+# Example: ./test-webhook.sh 50000 OUTGOING
+# Example: ./test-webhook.sh 100000 INCOMING (will be ignored by server)
 
 BASE_URL="${JAGOAN_URL:-http://localhost:8081}"
 AMOUNT="${1:-10000}"
+TYPE="${2:-OUTGOING}"
 
 echo "🧪 Testing Jagoan Webhook Endpoint"
 echo "=================================="
 echo "📍 URL: $BASE_URL/webhook/transaction"
 echo "💰 Amount: Rp $AMOUNT"
+echo "📋 Type: $TYPE"
 echo ""
 
 # Test webhook endpoint
 echo "📤 Sending POST request..."
 response=$(curl -s -w "\n%{http_code}" -X POST "$BASE_URL/webhook/transaction" \
   -H "Content-Type: application/json" \
-  -d "{\"amount\": $AMOUNT}")
+  -d "{\"amount\": $AMOUNT, \"type\": \"$TYPE\"}")
 
 # Extract body and status code
 http_code=$(echo "$response" | tail -n1)

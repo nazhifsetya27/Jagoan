@@ -136,7 +136,22 @@ async function createNotionTransaction(name, amount) {
  */
 app.post("/webhook/transaction", async (req, res) => {
   try {
-    const { amount } = req.body;
+    const { amount, type } = req.body;
+
+    // Check notification type - only process OUTGOING transactions
+    // INCOMING notifications (promos, received money, cashback, etc.) should be ignored
+    if (type && type !== "OUTGOING") {
+      console.log(
+        `ℹ️  Ignoring ${type} notification with amount: ${formatIDR(
+          amount || 0
+        )}`
+      );
+      return res.json({
+        success: true,
+        skipped: true,
+        message: `Notification type '${type}' ignored. Only OUTGOING transactions are processed.`,
+      });
+    }
 
     // Validate amount
     if (!amount || typeof amount !== "number") {
