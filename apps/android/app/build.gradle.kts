@@ -16,8 +16,8 @@ android {
         applicationId = "com.nazhif.jagoan"
         minSdk = 30
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -39,6 +39,14 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Local testing: hits the Mac's backend via `adb reverse tcp:3000 tcp:3000`.
+            buildConfigField(
+                "String",
+                "SERVER_BASE_URL",
+                "\"http://localhost:3000/webhook/transaction\""
+            )
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(
@@ -46,6 +54,11 @@ android {
                 "proguard-rules.pro"
             )
             signingConfig = signingConfigs.getByName("release")
+            buildConfigField(
+                "String",
+                "SERVER_BASE_URL",
+                "\"https://jagoan.kalachakra.io/webhook/transaction\""
+            )
         }
     }
     compileOptions {
@@ -54,6 +67,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
@@ -66,7 +80,13 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
-    
+    implementation(libs.androidx.compose.foundation)
+
+    // Lifecycle + SavedState owners — required to host a Compose ComposeView
+    // inside a WindowManager overlay (outside an Activity).
+    implementation(libs.androidx.lifecycle.viewmodel.savedstate)
+    implementation(libs.androidx.savedstate)
+
     // OkHttp for making HTTP requests to the server
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     

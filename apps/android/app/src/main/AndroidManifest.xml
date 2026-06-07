@@ -5,6 +5,9 @@
     <!-- Permission to make HTTP requests to the server -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- Permission to draw the transaction overlay over other apps (overlay mode) -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"

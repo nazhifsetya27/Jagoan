@@ -1,8 +1,16 @@
 package com.nazhif.jagoan
 
+import android.content.Context
+import android.content.Intent
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
+import com.nazhif.jagoan.overlay.OverlayCategory
+import com.nazhif.jagoan.overlay.OverlayController
+import com.nazhif.jagoan.overlay.OverlayTransaction
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -32,10 +40,25 @@ class JagoanListenerService : NotificationListenerService() {
     
     // HTTP client for making network requests
     private val httpClient = OkHttpClient()
-    
-    // Server URL - Using localhost via ADB port forwarding
-    // This bypasses WiFi network isolation issues
-    private val SERVER_URL = "https://jagoan.kalachakra.io/webhook/transaction"
+
+    // Server base URL for the webhook (debug -> localhost via `adb reverse`,
+    // release -> production). Set per build type in build.gradle.kts.
+    // /confirm and /discard are derived from it.
+    private val BASE_URL = BuildConfig.SERVER_BASE_URL
+
+    // Posts results back to the main thread (overlay UI lives there).
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    // Floating overlay used in "overlay" mode (created lazily on first use).
+    private val overlayController by lazy {
+        OverlayController(
+            context = this,
+            onConfirm = { transactionId, name, categoryKey, onResult ->
+                confirmTransaction(transactionId, name, categoryKey, onResult)
+            },
+            onDiscard = { transactionId -> discardTransaction(transactionId) },
+        )
+    }
     
     // Package name of the Jago banking app (verified via adb)
     private val JAGO_PACKAGE = "com.jago.digitalBanking"
@@ -52,6 +75,10 @@ class JagoanListenerService : NotificationListenerService() {
     /**
      * Detect if the notification is an outgoing transaction (expense) or incoming (revenue/promo)
      * 
+     * Based on actual Jago notification patterns (in English):
+     * - OUTGOING: "You've transferred Rp5.000 to NAZHIF SETYA NUGROHO..."
+     * - INCOMING: "You've received Rp5.000 from GoPay..."
+     * 
      * @param title The notification title
      * @param text The notification text
      * @return TYPE_OUTGOING for expenses, TYPE_INCOMING for received money/promos
@@ -60,15 +87,32 @@ class JagoanListenerService : NotificationListenerService() {
         val combinedText = "$title $text".lowercase()
         
         // Keywords that indicate OUTGOING transactions (expenses)
+        // English patterns (actual Jago notifications)
         val outgoingKeywords = listOf(
+            // English - Primary patterns from actual Jago notifications
+            "you've transferred",   // "You've transferred Rp5.000 to..."
+            "you have transferred", // Alternative phrasing
+            "transferred to",       // "transferred Rp5.000 to NAZHIF..."
+            "made a transfer",      // "You have made a transfer"
+            "you've paid",          // Payment notification
+            "you have paid",        // Alternative phrasing
+            "paid to",              // "paid Rp... to..."
+            "you've sent",          // Sent money
+            "you have sent",        // Alternative phrasing
+            "sent to",              // "sent Rp... to..."
+            "withdrawal",           // Cash withdrawal
+            "payment successful",   // Payment confirmation
+            "purchase",             // Purchase notification
+            "top up",               // Top up e-wallet
+            "topped up",            // Topped up
+            
+            // Indonesian patterns (backup)
             "transfer berhasil",    // Successful transfer (sent)
             "pembayaran berhasil",  // Successful payment
             "transaksi berhasil",   // Successful transaction
             "berhasil dikirim",     // Successfully sent
             "tarik tunai",          // Cash withdrawal
-            "pembayaran ke",        // Payment to
             "transfer ke",          // Transfer to
-            "top up",               // Top up (e.g., e-wallet)
             "bayar ",               // Pay
             "beli ",                // Buy
             "pembelian"             // Purchase
@@ -76,24 +120,37 @@ class JagoanListenerService : NotificationListenerService() {
         
         // Keywords that indicate INCOMING transactions (received money, promos, cashback)
         val incomingKeywords = listOf(
-            "transfer masuk",       // Incoming transfer
-            "terima ",              // Receive
-            "menerima",             // Received
+            // English - Primary patterns from actual Jago notifications
+            "you've received",      // "You've received Rp5.000 from GoPay"
+            "you have received",    // Alternative phrasing
+            "received from",        // "received Rp... from..."
+            "you've got",           // Got money
+            "you have got",         // Alternative phrasing
+            "incoming transfer",    // Incoming transfer
+            "money received",       // Money received
+            
+            // Common patterns for promos/cashback
             "promo",                // Promo
             "cashback",             // Cashback
             "bonus",                // Bonus
+            "reward",               // Reward
+            "interest",             // Interest earned
+            "refund",               // Refund
+            
+            // Indonesian patterns (backup)
+            "transfer masuk",       // Incoming transfer
+            "terima ",              // Receive
+            "menerima",             // Received
             "hadiah",               // Gift/reward
             "pengembalian",         // Refund
-            "refund",               // Refund (English)
             "saldo masuk",          // Balance in
-            "dari ",                // From (indicates receiving)
-            "bunga",                // Interest
-            "reward"                // Reward
+            "bunga"                 // Interest
         )
         
         // Check for outgoing keywords first (expenses are what we want to track)
         for (keyword in outgoingKeywords) {
             if (combinedText.contains(keyword)) {
+                Log.d(TAG, "🔍 Matched OUTGOING keyword: '$keyword'")
                 return TYPE_OUTGOING
             }
         }
@@ -101,12 +158,14 @@ class JagoanListenerService : NotificationListenerService() {
         // Check for incoming keywords
         for (keyword in incomingKeywords) {
             if (combinedText.contains(keyword)) {
+                Log.d(TAG, "🔍 Matched INCOMING keyword: '$keyword'")
                 return TYPE_INCOMING
             }
         }
         
         // Default: If we can't determine, assume INCOMING to be safe
         // This prevents accidentally logging promos as expenses
+        Log.d(TAG, "⚠️ No keyword matched, defaulting to INCOMING")
         return TYPE_INCOMING
     }
 
@@ -233,34 +292,138 @@ class JagoanListenerService : NotificationListenerService() {
                     put("amount", amount)
                     put("type", type)
                 }
-                
+
                 Log.d(TAG, "📤 Sending to server: $json")
-                
+
                 // Create the HTTP request body
                 val mediaType = "application/json; charset=utf-8".toMediaType()
                 val requestBody = json.toString().toRequestBody(mediaType)
-                
+
                 // Build the HTTP POST request
                 val request = Request.Builder()
-                    .url(SERVER_URL)
+                    .url(BASE_URL)
                     .post(requestBody)
                     .build()
-                
-                // Execute the request
-                val response = httpClient.newCall(request).execute()
-                
-                // Check if the request was successful
-                if (response.isSuccessful) {
+
+                // Execute the request (.use closes the response for us)
+                httpClient.newCall(request).execute().use { response ->
+                    // body.string() is single-use — read it exactly once.
+                    val bodyStr = response.body?.string()
+
+                    if (!response.isSuccessful) {
+                        Log.e(TAG, "❌ Server error: ${response.code} - ${response.message}")
+                        return@use
+                    }
+
                     Log.d(TAG, "✅ Successfully sent to server: ${response.code}")
-                } else {
-                    Log.e(TAG, "❌ Server error: ${response.code} - ${response.message}")
+
+                    // In "overlay" mode the server returns the data the on-device overlay
+                    // needs. In "telegram" mode there's nothing more to do here.
+                    val obj = bodyStr?.let { runCatching { JSONObject(it) }.getOrNull() }
+                    if (obj != null && obj.optString("mode") == "overlay") {
+                        maybeShowOverlay(obj)
+                    }
                 }
-                
-                response.close()
-                
             } catch (e: Exception) {
                 // Log any errors that occur
                 Log.e(TAG, "❌ Error sending to server: ${e.message}", e)
+            }
+        }
+    }
+
+    /**
+     * Parse an overlay-mode webhook response and show the floating overlay, if we're
+     * allowed to draw over other apps. Runs on the IO thread; the controller hops to main.
+     */
+    private fun maybeShowOverlay(obj: JSONObject) {
+        val transactionId = obj.optString("transactionId")
+        if (transactionId.isEmpty()) {
+            Log.e(TAG, "⚠️ Overlay response missing transactionId")
+            return
+        }
+
+        // Graceful fallback: without the "Display over other apps" permission we cannot
+        // show the overlay. Skip this round (MainActivity nudges the user to grant it).
+        if (!Settings.canDrawOverlays(this)) {
+            Log.w(TAG, "⚠️ Overlay permission not granted; skipping overlay for $transactionId")
+            return
+        }
+
+        val categories = mutableListOf<OverlayCategory>()
+        obj.optJSONArray("categories")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val c = arr.optJSONObject(i) ?: continue
+                val key = c.optString("key")
+                val label = c.optString("label")
+                if (key.isNotEmpty() && label.isNotEmpty()) {
+                    categories.add(OverlayCategory(key, label))
+                }
+            }
+        }
+
+        overlayController.show(
+            OverlayTransaction(
+                transactionId = transactionId,
+                amount = obj.optDouble("amount", 0.0),
+                categories = categories,
+            )
+        )
+    }
+
+    /**
+     * Submit the user's chosen purpose + category for a pending transaction.
+     * Delivers the result on the main thread (the overlay UI lives there).
+     */
+    private fun confirmTransaction(
+        transactionId: String,
+        name: String,
+        categoryKey: String?,
+        onResult: (success: Boolean, errorMessage: String?) -> Unit,
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            val (success, error) = try {
+                val json = JSONObject().apply {
+                    put("transactionId", transactionId)
+                    put("name", name)
+                    if (categoryKey != null) put("categoryKey", categoryKey)
+                }
+                val mediaType = "application/json; charset=utf-8".toMediaType()
+                val request = Request.Builder()
+                    .url("$BASE_URL/confirm")
+                    .post(json.toString().toRequestBody(mediaType))
+                    .build()
+
+                httpClient.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) {
+                        true to null
+                    } else {
+                        Log.e(TAG, "❌ Confirm failed: ${response.code}")
+                        false to "Gagal menyimpan (${response.code})."
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Error confirming transaction: ${e.message}", e)
+                false to "Tidak dapat terhubung ke server."
+            }
+            mainHandler.post { onResult(success, error) }
+        }
+    }
+
+    /**
+     * Fire-and-forget: drop a cancelled transaction from the server cache.
+     */
+    private fun discardTransaction(transactionId: String) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val json = JSONObject().apply { put("transactionId", transactionId) }
+                val mediaType = "application/json; charset=utf-8".toMediaType()
+                val request = Request.Builder()
+                    .url("$BASE_URL/discard")
+                    .post(json.toString().toRequestBody(mediaType))
+                    .build()
+                httpClient.newCall(request).execute().use { /* result ignored */ }
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Error discarding transaction: ${e.message}", e)
             }
         }
     }
@@ -271,5 +434,42 @@ class JagoanListenerService : NotificationListenerService() {
      */
     override fun onNotificationRemoved(sbn: StatusBarNotification?) {
         // Not needed for our use case
+    }
+
+    /**
+     * Called when notification access is granted and the listener is bound. If the user
+     * just enabled it from our in-app flow, bring Jagoan back to the foreground so they
+     * don't have to navigate out of system settings manually.
+     */
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (!prefs.getBoolean(KEY_AWAITING_NOTIF, false)) return
+        prefs.edit().putBoolean(KEY_AWAITING_NOTIF, false).apply()
+        try {
+            startActivity(
+                Intent(this, MainActivity::class.java).addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP
+                )
+            )
+            Log.d(TAG, "🔙 Notification access granted — returning to Jagoan")
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not return to app: ${e.message}")
+        }
+    }
+
+    /**
+     * Clean up the overlay window if the service is torn down, to avoid leaking it.
+     */
+    override fun onDestroy() {
+        super.onDestroy()
+        overlayController.dismiss()
+    }
+
+    companion object {
+        const val PREFS = "jagoan_prefs"
+        const val KEY_AWAITING_NOTIF = "awaiting_notif_grant"
     }
 }
