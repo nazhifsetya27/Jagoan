@@ -40,12 +40,12 @@ android {
 
     buildTypes {
         debug {
-            // Local testing: hits the Mac's backend via `adb reverse tcp:3000 tcp:3000`.
-            buildConfigField(
-                "String",
-                "SERVER_BASE_URL",
-                "\"http://localhost:3000/webhook/transaction\""
-            )
+            // Defaults to the deployed backend. For local dev, override with:
+            //   ./gradlew installDebug -PserverUrl=http://localhost:3000/webhook/transaction
+            //   (and run: adb reverse tcp:3000 tcp:3000)
+            val debugServerUrl = (project.findProperty("serverUrl") as String?)
+                ?: "https://jagoan.nemoris.site/webhook/transaction"
+            buildConfigField("String", "SERVER_BASE_URL", "\"$debugServerUrl\"")
         }
         release {
             isMinifyEnabled = false
@@ -57,7 +57,7 @@ android {
             buildConfigField(
                 "String",
                 "SERVER_BASE_URL",
-                "\"https://jagoan.kalachakra.io/webhook/transaction\""
+                "\"https://jagoan.nemoris.site/webhook/transaction\""
             )
         }
     }

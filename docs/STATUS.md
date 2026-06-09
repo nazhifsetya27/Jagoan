@@ -48,7 +48,7 @@ It is a thin, event-driven pipeline — not microservices, not MVC.
 |---|---|
 | Android | Kotlin, Jetpack Compose (Material3), NotificationListenerService, Coroutines, OkHttp 4.12, lifecycle/savedstate; `minSdk 30 / target 36`, `versionCode 2 / 1.1` |
 | Server | Node 18 (ESM), Express 4, Telegraf 4, `@notionhq/client` 2, node-cache, dotenv |
-| Infra | Docker Compose (app + nginx), host nginx reverse proxy, `jagoan.kalachakra.io` |
+| Infra | Docker Compose (app + nginx), host nginx reverse proxy, `jagoan.nemoris.site` |
 
 ## Feature status
 
@@ -113,7 +113,7 @@ Current month (June 2026):
 ## Deployment
 
 - **Server:** Docker Compose (`app:3000` + `nginx:8081`) behind a host nginx that terminates
-  `jagoan.kalachakra.io`. Env is read at startup — restart to change `MODE` / month.
+  `jagoan.nemoris.site`. Env is read at startup — restart to change `MODE` / month.
 - **Android:** debug build (`./gradlew installDebug`) targets `http://localhost:3000` via
   `adb reverse tcp:3000 tcp:3000`; release build targets the production URL automatically.
 
