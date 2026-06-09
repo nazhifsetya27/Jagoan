@@ -30,7 +30,8 @@ budgeting database. Single-user.
 - `./gradlew :app:assembleDebug` — build only.
 - Logs: `adb logcat -s JagoanSensor:D JagoanOverlay:D`.
 - **Debug builds talk to `http://localhost:3000`** via `BuildConfig.SERVER_BASE_URL`, so
-  first run `adb reverse tcp:3000 tcp:3000`. Release builds target `jagoan.kalachakra.io`.
+  builds target the deployed backend `https://jagoan.nemoris.site`. For local dev, override:
+  `./gradlew installDebug -PserverUrl=http://localhost:3000/webhook/transaction` + `adb reverse tcp:3000 tcp:3000`.
 
 ## Server endpoints
 
