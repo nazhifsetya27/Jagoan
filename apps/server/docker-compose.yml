@@ -1,5 +1,7 @@
-version: '3.8'
-
+# Jagoan server — runs behind the host's Caddy (public edge on :80/:443).
+# Only Caddy is public; the Node app binds to loopback. Caddy reverse-proxies
+# jagoan.nemoris.site -> 127.0.0.1:19220. (The old bundled nginx is gone — Caddy
+# replaces it and handles TLS automatically.)
 services:
   app:
     build: .
@@ -9,21 +11,5 @@ services:
       - .env
     environment:
       - PORT=3000
-    networks:
-      - app_network
-
-  nginx:
-    image: nginx:alpine
-    restart: always
     ports:
-      - "8081:80"
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-    depends_on:
-      - app
-    networks:
-      - app_network
-
-networks:
-  app_network:
-    driver: bridge
+      - "127.0.0.1:19220:3000"
