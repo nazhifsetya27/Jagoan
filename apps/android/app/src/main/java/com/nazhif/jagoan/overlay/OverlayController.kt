@@ -2,15 +2,20 @@ package com.nazhif.jagoan.overlay
 
 import android.content.Context
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.TextView
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -20,17 +25,21 @@ import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.nazhif.jagoan.ui.theme.JagoanAndroidTheme
+import kotlin.math.hypot
 
 /**
- * Owns the floating overlay window: shows a Compose UI inside a WindowManager view,
- * keeps all WindowManager work on the main thread, and guards against leaks/double-shows.
+ * Owns the floating overlay: a full editing **card** window and a small draggable **bubble**
+ * window (chat-head style). Only one is attached at a time.
  *
- * The overlay is triggered from the listener service's network callback (an OkHttp IO
- * thread), so every public method hops to the main thread internally.
+ * - Card (default): focusable (IME input), dims + blurs the apps behind for focus.
+ * - Bubble: tiny, `FLAG_NOT_FOCUSABLE | FLAG_NOT_TOUCH_MODAL`, no dim/blur so the background
+ *   stays fully readable (e.g. while showing a QRIS receipt to a merchant). Drag it anywhere;
+ *   tap it to expand back to the card.
  *
- * @param context a Context able to obtain WindowManager (the listener Service works)
- * @param onConfirm performs the server confirm POST; must deliver its result on the main thread
- * @param onDiscard performs the fire-and-forget discard POST
+ * Input state (`purpose`, `selectedKey`) is hoisted here on the controller, so it survives
+ * card ⇄ bubble toggles without re-typing.
+ *
+ * All public methods hop to the main thread; all WindowManager work stays on the main thread.
  */
 class OverlayController(
     private val context: Context,
@@ -48,16 +57,30 @@ class OverlayController(
         context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
     private var overlayView: View? = null
+    private var overlayParams: WindowManager.LayoutParams? = null
+    private var bubbleView: View? = null
+    private var bubbleParams: WindowManager.LayoutParams? = null
     private var lifecycleOwner: OverlayLifecycleOwner? = null
     private var currentTransactionId: String? = null
+    private var currentTransaction: OverlayTransaction? = null
 
     // Compose-observable UI state; recomposes the overlay as the save round-trip progresses.
     private var uiState by mutableStateOf<OverlayUiState>(OverlayUiState.Editing)
 
+    // Hoisted input state lives on the controller (NOT inside the composable) so it survives
+    // minimize/maximize without re-creating the window. Reset on each new transaction.
+    private var purpose by mutableStateOf("")
+    private var selectedKey by mutableStateOf<String?>(null)
+    private var minimized by mutableStateOf(false)
+
+    // Bubble position within the current transaction; reset to the default on each show.
+    private var bubblePosX = 0
+    private var bubblePosY = 0
+
     // Safety net: auto-dismiss an ignored overlay so it never holds focus forever.
     private val autoDismiss = Runnable { dismissInternal(discard = true) }
 
-    /** Show the overlay for [transaction]. Safe to call from any thread. No-op if one is already up. */
+    /** Show the overlay for [transaction]. Safe to call from any thread. No-op if one is up. */
     fun show(transaction: OverlayTransaction) {
         mainHandler.post { showInternal(transaction) }
     }
@@ -68,15 +91,30 @@ class OverlayController(
     }
 
     private fun showInternal(transaction: OverlayTransaction) {
-        // Debounce: ignore if an overlay is already attached (mirrors the service's
+        // Debounce: ignore if either window is already attached (mirrors the service's
         // amount-debounce). Avoids stacked windows / flicker.
-        if (overlayView != null) {
+        if (overlayView != null || bubbleView != null) {
             Log.d(tag, "Overlay already showing, ignoring new request")
             return
         }
 
         uiState = OverlayUiState.Editing
+        purpose = ""
+        selectedKey = transaction.categories.firstOrNull()?.key
+        minimized = false
         currentTransactionId = transaction.transactionId
+        currentTransaction = transaction
+        bubblePosX = 0
+        bubblePosY = 0
+
+        showCard(transaction)
+    }
+
+    // ---------------------------------------------------------------- card window ----
+
+    private fun showCard(transaction: OverlayTransaction) {
+        if (overlayView != null) return
+        mainHandler.removeCallbacks(autoDismiss)
 
         val owner = OverlayLifecycleOwner().apply { onCreate() }
         lifecycleOwner = owner
@@ -91,6 +129,11 @@ class OverlayController(
                     OverlayContent(
                         transaction = transaction,
                         uiState = uiState,
+                        purpose = purpose,
+                        onPurposeChange = { purpose = it },
+                        selectedKey = selectedKey,
+                        onSelectCategory = { selectedKey = it },
+                        onMinimizeToggle = { toggleMinimize() },
                         onSave = { name, categoryKey -> handleSave(name, categoryKey) },
                         onCancel = { handleCancel() },
                     )
@@ -150,27 +193,157 @@ class OverlayController(
                 blurBehindRadius = 80
             }
         }
+        overlayParams = params
 
         try {
             windowManager.addView(root, params)
             overlayView = root
             mainHandler.postDelayed(autoDismiss, AUTO_DISMISS_MS)
-            Log.d(tag, "Overlay shown for ${transaction.transactionId}")
-            root.post {
-                Log.d(
-                    tag,
-                    "Overlay laid out: ${root.width}x${root.height}, children=${root.childCount}"
-                )
-            }
+            Log.d(tag, "Overlay card shown for ${transaction.transactionId}")
         } catch (e: Exception) {
             // BadTokenException (permission revoked at runtime), IllegalState, etc.
             Log.e(tag, "Failed to add overlay view: ${e.message}", e)
             lifecycleOwner?.onDestroy()
             lifecycleOwner = null
             overlayView = null
+            overlayParams = null
             currentTransactionId = null
+            currentTransaction = null
         }
     }
+
+    private fun hideCard() {
+        val view = overlayView ?: return
+        try {
+            if (view.isAttachedToWindow) windowManager.removeView(view)
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to remove card view: ${e.message}", e)
+        }
+        lifecycleOwner?.onDestroy()
+        lifecycleOwner = null
+        overlayView = null
+        overlayParams = null
+    }
+
+    // --------------------------------------------------------------- bubble window ----
+
+    private fun showBubble() {
+        if (bubbleView != null) return
+        val density = context.resources.displayMetrics.density
+        val sizePx = (BUBBLE_SIZE_DP * density).toInt()
+
+        if (bubblePosX == 0 && bubblePosY == 0) {
+            val dm = context.resources.displayMetrics
+            bubblePosX = dm.widthPixels - sizePx - (12 * density).toInt()
+            bubblePosY = (dm.heightPixels * 0.4f).toInt()
+        }
+
+        val params = WindowManager.LayoutParams(
+            sizePx,
+            sizePx,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            // Not focusable + not touch-modal: taps elsewhere fall through to the app, and the
+            // bubble never grabs focus. No DIM/BLUR so the background stays readable.
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = bubblePosX
+            y = bubblePosY
+        }
+
+        val bubbleRoot = FrameLayout(context)
+        val emoji = TextView(context).apply {
+            text = "💰"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f)
+            gravity = Gravity.CENTER
+        }
+        bubbleRoot.addView(
+            emoji,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        val bg = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColors(intArrayOf(0xFF4F46E5.toInt(), 0xFF818CF8.toInt()))
+        }
+        bubbleRoot.background = bg
+        attachBubbleDrag(bubbleRoot)
+
+        try {
+            windowManager.addView(bubbleRoot, params)
+            bubbleView = bubbleRoot
+            bubbleParams = params
+            Log.d(tag, "Bubble shown")
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to add bubble view: ${e.message}", e)
+            bubbleView = null
+            bubbleParams = null
+        }
+    }
+
+    private fun hideBubble() {
+        val b = bubbleView ?: return
+        try {
+            if (b.isAttachedToWindow) windowManager.removeView(b)
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to remove bubble view: ${e.message}", e)
+        }
+        bubbleView = null
+        bubbleParams = null
+    }
+
+    /** Drag the bubble around; a tap (no significant move) expands back to the card. */
+    private fun attachBubbleDrag(root: View) {
+        val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
+        var downX = 0f
+        var downY = 0f
+        var startX = 0
+        var startY = 0
+        var moved = false
+
+        root.setOnTouchListener { v, e ->
+            val params = bubbleParams ?: return@setOnTouchListener true
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = e.rawX
+                    downY = e.rawY
+                    startX = params.x
+                    startY = params.y
+                    moved = false
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = e.rawX - downX
+                    val dy = e.rawY - downY
+                    if (hypot(dx, dy) > touchSlop) moved = true
+                    if (moved) {
+                        params.x = startX + dx.toInt()
+                        params.y = startY + dy.toInt()
+                        bubblePosX = params.x
+                        bubblePosY = params.y
+                        try {
+                            windowManager.updateViewLayout(v, params)
+                        } catch (ex: Exception) {
+                            Log.e(tag, "Failed to move bubble: ${ex.message}", ex)
+                        }
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (!moved) toggleMinimize() // tap = expand back to the card
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> true
+                else -> true
+            }
+        }
+    }
+
+    // --------------------------------------------------------------- actions ----
 
     private fun handleSave(name: String, categoryKey: String?) {
         val txnId = currentTransactionId ?: return
@@ -190,6 +363,22 @@ class OverlayController(
         dismissInternal(discard = true)
     }
 
+    /** Swap between the editing card and the draggable bubble. Safe from any thread. */
+    fun toggleMinimize() {
+        mainHandler.post {
+            // Never minimize away the success state; it auto-closes in a moment.
+            if (uiState is OverlayUiState.Success) return@post
+            minimized = !minimized
+            if (minimized) {
+                hideCard()
+                showBubble()
+            } else {
+                hideBubble()
+                currentTransaction?.let { showCard(it) }
+            }
+        }
+    }
+
     private fun dismissInternal(discard: Boolean) {
         mainHandler.removeCallbacks(autoDismiss)
 
@@ -197,26 +386,16 @@ class OverlayController(
             currentTransactionId?.let { onDiscard(it) }
         }
 
-        val view = overlayView
-        if (view != null) {
-            try {
-                if (view.isAttachedToWindow) {
-                    windowManager.removeView(view)
-                }
-            } catch (e: Exception) {
-                Log.e(tag, "Failed to remove overlay view: ${e.message}", e)
-            }
-        }
-
-        lifecycleOwner?.onDestroy()
-        lifecycleOwner = null
-        overlayView = null
+        hideCard()
+        hideBubble()
         currentTransactionId = null
+        currentTransaction = null
         uiState = OverlayUiState.Editing
     }
 
     private companion object {
         const val AUTO_DISMISS_MS = 120_000L // 2 minutes
         const val SUCCESS_DISMISS_MS = 900L
+        const val BUBBLE_SIZE_DP = 62
     }
 }

@@ -18,19 +18,20 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -82,23 +83,31 @@ private fun amountDigits(amount: Double): String =
     formatIdr(amount).replace("Rp", "").trim()
 
 /**
- * The floating "glass" overlay: a compact translucent card with the amount + tag on top,
- * a purpose field, a horizontally-scrolling category row, and compact actions. The amount
- * is display-only (by design).
+ * The floating "glass" overlay. Two states:
+ *
+ * - **minimized** = a compact pill showing just the amount, the OUTGOING tag, and an expand
+ *   button. Tapping anywhere on it expands back to the full card. Purpose + category are
+ *   kept alive by the controller (hoisted state), so nothing typed is lost.
+ * - **expanded** (default) = the full card: amount + tag, a purpose field, a horizontally
+ *   scrolling category row, and compact actions. A collapse button sits in the top-right so
+ *   the user can tuck it out of the way (e.g. to show a QRIS receipt to a merchant) without
+ *   discarding the transaction.
+ *
+ * The amount is display-only (by design).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun OverlayContent(
     transaction: OverlayTransaction,
     uiState: OverlayUiState,
+    purpose: String,
+    onPurposeChange: (String) -> Unit,
+    selectedKey: String?,
+    onSelectCategory: (String) -> Unit,
+    onMinimizeToggle: () -> Unit,
     onSave: (name: String, categoryKey: String?) -> Unit,
     onCancel: () -> Unit,
 ) {
-    var purpose by remember { mutableStateOf("") }
-    var selectedKey by remember {
-        mutableStateOf(transaction.categories.firstOrNull()?.key)
-    }
-
     val isBusy = uiState is OverlayUiState.Saving || uiState is OverlayUiState.Success
     val canSave = purpose.isNotBlank() && !isBusy
 
@@ -109,57 +118,89 @@ fun OverlayContent(
             .padding(horizontal = 14.dp)
             .padding(top = 8.dp, bottom = 26.dp)
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(26.dp))
-                .background(CardBg)
-                .border(1.dp, HairLine, RoundedCornerShape(26.dp))
-                .padding(18.dp)
-        ) {
-            if (uiState is OverlayUiState.Success) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("✅", fontSize = 20.sp)
-                    Spacer(Modifier.width(10.dp))
-                    Text(
-                        "Tersimpan!",
-                        color = Color.White,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
-                return@Box
-            }
+        ExpandedCard(
+            transaction = transaction,
+            uiState = uiState,
+            purpose = purpose,
+            onPurposeChange = onPurposeChange,
+            selectedKey = selectedKey,
+            onSelectCategory = onSelectCategory,
+            canSave = canSave,
+            isBusy = isBusy,
+            onMinimize = onMinimizeToggle,
+            onSave = onSave,
+            onCancel = onCancel,
+        )
+    }
+}
 
-            Column {
-                // Top: amount (left) + OUTGOING tag (right)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.Top,
-                ) {
-                    Column {
-                        Row(verticalAlignment = Alignment.Bottom) {
-                            Text(
-                                "Rp ",
-                                color = AccentSoft,
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                            Text(
-                                amountDigits(transaction.amount),
-                                color = Color.White,
-                                fontSize = 34.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                            )
-                        }
-                        Spacer(Modifier.height(4.dp))
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ExpandedCard(
+    transaction: OverlayTransaction,
+    uiState: OverlayUiState,
+    purpose: String,
+    onPurposeChange: (String) -> Unit,
+    selectedKey: String?,
+    onSelectCategory: (String) -> Unit,
+    canSave: Boolean,
+    isBusy: Boolean,
+    onMinimize: () -> Unit,
+    onSave: (name: String, categoryKey: String?) -> Unit,
+    onCancel: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(26.dp))
+            .background(CardBg)
+            .border(1.dp, HairLine, RoundedCornerShape(26.dp))
+            .padding(18.dp)
+    ) {
+        if (uiState is OverlayUiState.Success) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("✅", fontSize = 20.sp)
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    "Tersimpan!",
+                    color = Color.White,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            return@Box
+        }
+
+        Column {
+            // Top: amount (left) + OUTGOING tag + collapse button (right)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Top,
+            ) {
+                Column {
+                    Row(verticalAlignment = Alignment.Bottom) {
                         Text(
-                            "🎯 Pengeluaran baru",
-                            color = Muted,
-                            fontSize = 12.sp,
+                            "Rp ",
+                            color = AccentSoft,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            amountDigits(transaction.amount),
+                            color = Color.White,
+                            fontSize = 34.sp,
+                            fontWeight = FontWeight.ExtraBold,
                         )
                     }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "🎯 Pengeluaran baru",
+                        color = Muted,
+                        fontSize = 12.sp,
+                    )
+                }
+                Column(horizontalAlignment = Alignment.End) {
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(7.dp))
@@ -173,94 +214,104 @@ fun OverlayContent(
                             fontWeight = FontWeight.Bold,
                         )
                     }
-                }
-
-                Spacer(Modifier.height(14.dp))
-
-                OutlinedTextField(
-                    value = purpose,
-                    onValueChange = { purpose = it },
-                    placeholder = { Text("Untuk keperluan apa?") },
-                    singleLine = true,
-                    enabled = !isBusy,
-                    shape = RoundedCornerShape(13.dp),
-                    modifier = Modifier.fillMaxWidth(),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    keyboardActions = KeyboardActions(
-                        onDone = { if (canSave) onSave(purpose.trim(), selectedKey) },
-                    ),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = Accent,
-                        unfocusedBorderColor = HairLine,
-                        focusedContainerColor = FieldBg,
-                        unfocusedContainerColor = FieldBg,
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White,
-                        cursorColor = Accent,
-                        focusedPlaceholderColor = Muted,
-                        unfocusedPlaceholderColor = Muted,
-                    ),
-                )
-
-                if (transaction.categories.isNotEmpty()) {
-                    Spacer(Modifier.height(13.dp))
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    IconButton(
+                        onClick = onMinimize,
+                        enabled = !isBusy,
                     ) {
-                        transaction.categories.forEach { category ->
-                            GlassChip(
-                                label = category.label,
-                                selected = category.key == selectedKey,
-                                enabled = !isBusy,
-                                onClick = { selectedKey = category.key },
-                            )
-                        }
+                        Icon(
+                            imageVector = Icons.Default.KeyboardArrowDown,
+                            contentDescription = "Ciutkan",
+                            tint = Muted,
+                        )
                     }
                 }
+            }
 
-                if (uiState is OverlayUiState.Error) {
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        uiState.message,
-                        color = Color(0xFFFF6B6B),
-                        fontSize = 12.sp,
-                    )
-                }
+            Spacer(Modifier.height(14.dp))
 
-                Spacer(Modifier.height(16.dp))
+            OutlinedTextField(
+                value = purpose,
+                onValueChange = onPurposeChange,
+                placeholder = { Text("Untuk keperluan apa?") },
+                singleLine = true,
+                enabled = !isBusy,
+                shape = RoundedCornerShape(13.dp),
+                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(
+                    onDone = { if (canSave) onSave(purpose.trim(), selectedKey) },
+                ),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = Accent,
+                    unfocusedBorderColor = HairLine,
+                    focusedContainerColor = FieldBg,
+                    unfocusedContainerColor = FieldBg,
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White,
+                    cursorColor = Accent,
+                    focusedPlaceholderColor = Muted,
+                    unfocusedPlaceholderColor = Muted,
+                ),
+            )
 
+            if (transaction.categories.isNotEmpty()) {
+                Spacer(Modifier.height(13.dp))
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    TextButton(onClick = onCancel, enabled = !isBusy) {
-                        Text("Batal", color = Muted, fontWeight = FontWeight.SemiBold)
+                    transaction.categories.forEach { category ->
+                        GlassChip(
+                            label = category.label,
+                            selected = category.key == selectedKey,
+                            enabled = !isBusy,
+                            onClick = { onSelectCategory(category.key) },
+                        )
                     }
-                    Spacer(Modifier.width(8.dp))
-                    Button(
-                        onClick = { onSave(purpose.trim(), selectedKey) },
-                        enabled = canSave,
-                        shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Accent,
-                            contentColor = Color.White,
-                            disabledContainerColor = Color(0x33FFFFFF),
-                            disabledContentColor = Color(0x80FFFFFF),
-                        ),
-                    ) {
-                        if (uiState is OverlayUiState.Saving) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(18.dp),
-                                strokeWidth = 2.dp,
-                                color = Color.White,
-                            )
-                        } else {
-                            Text("Simpan", fontWeight = FontWeight.Bold)
-                        }
+                }
+            }
+
+            if (uiState is OverlayUiState.Error) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    uiState.message,
+                    color = Color(0xFFFF6B6B),
+                    fontSize = 12.sp,
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = onCancel, enabled = !isBusy) {
+                    Text("Batal", color = Muted, fontWeight = FontWeight.SemiBold)
+                }
+                Spacer(Modifier.width(8.dp))
+                Button(
+                    onClick = { onSave(purpose.trim(), selectedKey) },
+                    enabled = canSave,
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Accent,
+                        contentColor = Color.White,
+                        disabledContainerColor = Color(0x33FFFFFF),
+                        disabledContentColor = Color(0x80FFFFFF),
+                    ),
+                ) {
+                    if (uiState is OverlayUiState.Saving) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = Color.White,
+                        )
+                    } else {
+                        Text("Simpan", fontWeight = FontWeight.Bold)
                     }
                 }
             }
